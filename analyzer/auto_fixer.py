@@ -6,6 +6,8 @@ def apply_rule_fix(file_content, line_number, category, error_message):
     """
     Applies rule-based regular expression repairs to common Python issues.
     """
+    # Detect line ending style
+    line_ending = "\r\n" if "\r\n" in file_content else "\n"
     lines = file_content.splitlines()
     if not (0 < line_number <= len(lines)):
         return file_content, "Line number out of bounds. No rule-based fix applied."
@@ -13,12 +15,14 @@ def apply_rule_fix(file_content, line_number, category, error_message):
     idx = line_number - 1
     target_line = lines[idx]
     explanation = ""
+    changed = False
     
     # 1. Unused Imports
     if "unused import" in error_message.lower() or "unused import" in category.lower() or "f401" in error_message.lower():
         # Comment out the unused import
         lines[idx] = f"# {target_line}  # Removed: unused import"
         explanation = f"Commented out unused import on line {line_number}."
+        changed = True
         
     # 2. Bare Except Block
     elif "bare except" in error_message.lower() or "except:" in target_line:
@@ -28,12 +32,14 @@ def apply_rule_fix(file_content, line_number, category, error_message):
             lines[idx] = new_line
             # If body is pass, let's keep it but add a print/logging or simple statement
             explanation = f"Replaced bare 'except:' with 'except Exception as e:' on line {line_number} to capture errors properly."
+            changed = True
             
     # 3. Dangerous eval/exec
     elif "eval(" in target_line and ("eval" in error_message.lower() or "security" in category.lower()):
         # Replace eval with ast.literal_eval (requires import ast at top)
         new_line = target_line.replace("eval(", "ast.literal_eval(")
         lines[idx] = new_line
+        changed = True
         
         # Ensure import ast is present in the file
         has_ast_import = any("import ast" in line for line in lines)
@@ -53,6 +59,7 @@ def apply_rule_fix(file_content, line_number, category, error_message):
             replaced = f"{dividend} / len({list_name}) if len({list_name}) != 0 else 0"
             lines[idx] = target_line.replace(match.group(0), replaced)
             explanation = f"Added length check guard to prevent division by zero on line {line_number}."
+            changed = True
         else:
             # General division fallback
             explanation = f"ZeroDivisionError detected on line {line_number}. Add a check: if divisor != 0 before division."
@@ -62,12 +69,14 @@ def apply_rule_fix(file_content, line_number, category, error_message):
         # Comment out the line
         lines[idx] = f"# {target_line}  # Removed: unreachable dead code"
         explanation = f"Commented out unreachable dead code statement on line {line_number}."
+        changed = True
         
+    if changed:
+        return line_ending.join(lines), explanation
     else:
         explanation = f"No rule-based templates match this error. Please use Gemini AI to generate a structural repair suggestion."
-        
-    return "\n".join(lines), explanation
-
+        return file_content, explanation
+ 
 def recommend_and_fix(file_content, file_path, line_number, category, error_message, gemini_client=None):
     """
     Coordinates bug correction using AI (if available) or falling back to regex rule sets.
@@ -86,13 +95,22 @@ def recommend_and_fix(file_content, file_path, line_number, category, error_mess
             error_message=error_message
         )
         if fixed_code:
-            fix_type = "AI-Powered"
-            explanation = f"Gemini AI successfully refactored and repaired the bug on line {line_number}."
+            # Normalize line endings to compare content only
+            norm_orig = file_content.replace("\r\n", "\n")
+            norm_fixed = fixed_code.replace("\r\n", "\n")
+            if norm_fixed != norm_orig:
+                fix_type = "AI-Powered"
+                explanation = f"Gemini AI successfully refactored and repaired the bug on line {line_number}."
+            else:
+                fixed_code = None
             
     # 2. Fallback to Local Rules
     if not fixed_code:
         fixed_code, rule_explanation = apply_rule_fix(file_content, line_number, category, error_message)
-        if fixed_code != file_content:
+        # Normalize line endings to compare content only
+        norm_orig = file_content.replace("\r\n", "\n")
+        norm_fixed = fixed_code.replace("\r\n", "\n")
+        if norm_fixed != norm_orig:
             fix_type = "Rule-Based"
             explanation = rule_explanation
         else:

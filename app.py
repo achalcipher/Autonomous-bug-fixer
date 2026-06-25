@@ -235,6 +235,8 @@ if "selected_issue_id" not in st.session_state:
     st.session_state["selected_issue_id"] = None
 if "chat_history" not in st.session_state:
     st.session_state["chat_history"] = []
+if "explanation" not in st.session_state:
+    st.session_state["explanation"] = None
 
 # Instantiate Gemini Client
 ai_client = GeminiClient(api_key=st.session_state["api_key"])
@@ -441,6 +443,10 @@ editor_code = st_ace(
 # Keep session state updated with editor contents
 if editor_code != st.session_state["editor_code"]:
     st.session_state["editor_code"] = editor_code
+    # Clear stale results/explanations so they don't show old panels
+    st.session_state["repaired_code"] = None
+    st.session_state["repair_logs"] = None
+    st.session_state["explanation"] = None
 
 # Instant Syntax Warning Block (Under the editor)
 # Performs a quick compiler check as they edit
@@ -622,7 +628,41 @@ if btn_autofix:
             
             st.session_state["repaired_code"] = current_code
             st.session_state["repair_logs"] = fixed_log
-            st.success("Proposed code repair generated successfully!")
+            if fixed_log:
+                st.success("Proposed code repair generated successfully!")
+            else:
+                st.warning("No automatic corrections could be applied to the detected issues.")
+
+# Logic D: Explain Errors
+if btn_explain:
+    if not st.session_state["analysis_results"]:
+        st.warning("⚠️ Please run '🔍 Analyze Code' first to discover codebase issues before explaining them.")
+    else:
+        # Get active issue from selected label
+        selected_label = st.session_state.get("selected_issue_label")
+        details = st.session_state["analysis_results"]["details"]
+        
+        # Recreate options map to find the correct index
+        issues_options = {}
+        for i, issue in enumerate(details):
+            emoji = {"Critical": "🔴", "High": "🟠", "Medium": "🟡", "Low": "🔵"}.get(issue["severity"], "🔵")
+            label = f"{emoji} Line {issue['line_number']} [{issue['category']}] - {issue['error_message'][:70]}..."
+            issues_options[label] = i
+            
+        if selected_label in issues_options:
+            active_issue = details[issues_options[selected_label]]
+            with st.spinner("Generating educational bug explanation dossier..."):
+                expl = ai_client.explain_bug(
+                    file_path=st.session_state["active_filename"],
+                    line_number=active_issue["line_number"],
+                    category=active_issue["category"],
+                    severity=active_issue["severity"],
+                    error_message=active_issue["error_message"],
+                    code_snippet=active_issue["code_snippet"]
+                )
+                st.session_state["explanation"] = expl
+        else:
+            st.error("Selected issue could not be resolved from active session diagnostics.")
 
 # ----------------- DISPLAY PANELS -----------------
 
@@ -735,7 +775,12 @@ if st.session_state["analysis_results"]:
             label = f"{emoji} Line {issue['line_number']} [{issue['category']}] - {issue['error_message'][:70]}..."
             issues_options[label] = i
             
-        selected_issue_label = st.selectbox("Select issue to review or explain", list(issues_options.keys()))
+        selected_issue_label = st.selectbox(
+            "Select issue to review or explain",
+            options=list(issues_options.keys()),
+            key="selected_issue_label",
+            on_change=lambda: st.session_state.update({"explanation": None})
+        )
         selected_idx = issues_options[selected_issue_label]
         active_issue = details[selected_idx]
         
@@ -746,19 +791,11 @@ if st.session_state["analysis_results"]:
                 f"- **Snippet:** `{active_issue['code_snippet']}`\n"
                 f"- **Suggestion:** {active_issue['fix_suggestion']}")
         
-        # Explain button logic
-        if btn_explain:
-            with st.spinner("Querying explanation dossier..."):
-                expl = ai_client.explain_bug(
-                    file_path=st.session_state["active_filename"],
-                    line_number=active_issue["line_number"],
-                    category=active_issue["category"],
-                    severity=active_issue["severity"],
-                    error_message=active_issue["error_message"],
-                    code_snippet=active_issue["code_snippet"]
-                )
-                st.markdown("##### 💡 AI Bug Analysis Explanation")
-                st.markdown(expl)
+        # Show explanation if generated and persistent in session state
+        if st.session_state["explanation"]:
+            st.markdown("---")
+            st.markdown("##### 💡 AI Bug Analysis Explanation")
+            st.markdown(st.session_state["explanation"])
                 
     # PDF Report Button
     st.markdown("---")
@@ -786,40 +823,51 @@ if st.session_state["analysis_results"]:
 
 # PANEL 3: Auto-Fix Comparison Block
 if st.session_state["repaired_code"] is not None:
-    st.markdown("---")
-    st.subheader("🔧 Proposed Auto-Fix Code Corrections")
+    # Compare ignoring line ending differences
+    norm_orig = st.session_state["editor_code"].replace("\r\n", "\n")
+    norm_repaired = st.session_state["repaired_code"].replace("\r\n", "\n")
+    has_changes = (norm_repaired != norm_orig)
     
-    # Display repair logs/summary
-    if st.session_state.get("repair_logs"):
-        st.markdown("**Applied Repair Sweeps:**")
-        for log in st.session_state["repair_logs"]:
-            st.markdown(f"- {log}")
-            
-    col_c1, col_c2 = st.columns(2)
-    
-    with col_c1:
-        st.caption("Original Code Workspace")
-        st.code(st.session_state["editor_code"], language="python")
+    if has_changes:
+        st.markdown("---")
+        st.subheader("🔧 Proposed Auto-Fix Code Corrections")
         
-    with col_c2:
-        st.caption("Repaired Autocorrected Code")
-        st.code(st.session_state["repaired_code"], language="python")
+        # Display repair logs/summary
+        if st.session_state.get("repair_logs"):
+            st.markdown("**Applied Repair Sweeps:**")
+            for log in st.session_state["repair_logs"]:
+                st.markdown(f"- {log}")
+                
+        col_c1, col_c2 = st.columns(2)
         
-    col_a1, col_a2 = st.columns(2)
-    with col_a1:
-        if st.button("💾 Apply Proposed Repairs to Editor", use_container_width=True):
-            st.session_state["editor_code"] = st.session_state["repaired_code"]
-            st.session_state["editor_key_counter"] += 1
-            st.session_state["repaired_code"] = None # Reset
-            st.success("Proposed fixes written back to code editor workspace! You can run, execute, or re-scan now.")
-            st.rerun()
+        with col_c1:
+            st.caption("Original Code Workspace")
+            st.code(st.session_state["editor_code"], language="python")
             
-    with col_a2:
-        # Download Fixed Code file
-        st.download_button(
-            label="📥 Download Fixed Code (.py)",
-            data=st.session_state["repaired_code"],
-            file_name=f"fixed_{st.session_state['active_filename']}",
-            mime="text/x-python",
-            use_container_width=True
-        )
+        with col_c2:
+            st.caption("Repaired Autocorrected Code")
+            st.code(st.session_state["repaired_code"], language="python")
+            
+        col_a1, col_a2 = st.columns(2)
+        with col_a1:
+            if st.button("💾 Apply Proposed Repairs to Editor", use_container_width=True):
+                st.session_state["editor_code"] = st.session_state["repaired_code"]
+                st.session_state["editor_key_counter"] += 1
+                st.session_state["repaired_code"] = None # Reset
+                st.success("Proposed fixes written back to code editor workspace! You can run, execute, or re-scan now.")
+                st.rerun()
+                
+        with col_a2:
+            # Download Fixed Code file
+            st.download_button(
+                label="📥 Download Fixed Code (.py)",
+                data=st.session_state["repaired_code"],
+                file_name=f"fixed_{st.session_state['active_filename']}",
+                mime="text/x-python",
+                use_container_width=True
+            )
+    else:
+        # Show warning that no edits were made
+        if st.session_state.get("repair_logs") is not None:
+            st.markdown("---")
+            st.warning("⚠️ No automatic corrections could be applied to the current code. Review the fix suggestions or ask the AI Chat assistant for help.")
