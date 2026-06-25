@@ -527,16 +527,21 @@ editor_code = st_ace(
 )
 
 # Keep session state updated with editor contents
-if editor_code != st.session_state["editor_code"]:
-    st.session_state["editor_code"] = editor_code
-    # Clear stale results/explanations so they don't show old panels
-    st.session_state["repaired_code"] = None
-    st.session_state["repair_logs"] = None
-    st.session_state["explanation"] = None
+if editor_code is not None:
+    norm_editor = editor_code.replace("\r\n", "\n")
+    norm_session = st.session_state["editor_code"].replace("\r\n", "\n") if st.session_state["editor_code"] else ""
+    if norm_editor != norm_session:
+        st.session_state["editor_code"] = editor_code
+        # Clear stale results/explanations so they don't show old panels
+        st.session_state["repaired_code"] = None
+        st.session_state["repair_logs"] = None
+        st.session_state["explanation"] = None
 
 # Instant Syntax Warning Block (Under the editor)
 # Performs a quick compiler check as they edit
-quick_syntax_errors = compile_analyzer.analyze_syntax(st.session_state["editor_code"], "sandbox.py")
+quick_syntax_errors = []
+if st.session_state["editor_code"]:
+    quick_syntax_errors = compile_analyzer.analyze_syntax(st.session_state["editor_code"], "sandbox.py")
 if quick_syntax_errors:
     syn = quick_syntax_errors[0]
     st.error(f"🚨 **Syntax Warning (Line {syn['line_number']}):** {syn['error_message']}")
