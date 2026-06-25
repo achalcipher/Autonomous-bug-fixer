@@ -1,0 +1,28 @@
+# Python compilation caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.ipynb_checkpoints
+
+# IDE local workspace caches
+.mypy_cache/
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# Database files
+database/bug_fixer.db
+database/*.db
+
+# Upload caches and temporary folders
+uploads/
+temp_*/
+
+# Local config and environment secrets
+.env
+.idea/
+.vscode/
+*.png
+*.pdf
