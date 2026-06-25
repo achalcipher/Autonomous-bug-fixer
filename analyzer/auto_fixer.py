@@ -2,6 +2,80 @@ import re
 import os
 import ast
 
+def fix_division_by_zero(file_content, line_number):
+    try:
+        tree = ast.parse(file_content)
+    except Exception:
+        return file_content, False
+        
+    class DivVisitor(ast.NodeVisitor):
+        def __init__(self):
+            self.matching_nodes = []
+        def visit_BinOp(self, node):
+            if isinstance(node.op, (ast.Div, ast.FloorDiv, ast.Mod)):
+                if getattr(node, 'lineno', None) == line_number:
+                    self.matching_nodes.append(node)
+            self.generic_visit(node)
+            
+    visitor = DivVisitor()
+    visitor.visit(tree)
+    
+    if not visitor.matching_nodes:
+        return file_content, False
+        
+    node = visitor.matching_nodes[0]
+    op_symbol = {ast.Div: "/", ast.FloorDiv: "//", ast.Mod: "%"}[type(node.op)]
+    left_str = ast.unparse(node.left)
+    right_str = ast.unparse(node.right)
+    replacement = f"({left_str} {op_symbol} {right_str} if {right_str} != 0 else 0)"
+    
+    lines = file_content.splitlines(keepends=True)
+    start_line_idx = node.lineno - 1
+    end_line_idx = node.end_lineno - 1
+    start_col = node.col_offset
+    end_col = node.end_col_offset
+    
+    prefix = "".join(lines[:start_line_idx]) + lines[start_line_idx][:start_col]
+    suffix = lines[end_line_idx][end_col:] + "".join(lines[end_line_idx + 1:])
+    
+    return prefix + replacement + suffix, True
+
+def fix_line_division(target_line):
+    indented = "    " + target_line.strip()
+    dummy_code = f"def _dummy():\n{indented}\n"
+    
+    try:
+        tree = ast.parse(dummy_code)
+    except Exception:
+        return target_line, False
+        
+    class DivVisitor(ast.NodeVisitor):
+        def __init__(self):
+            self.matching_nodes = []
+        def visit_BinOp(self, node):
+            if isinstance(node.op, (ast.Div, ast.FloorDiv, ast.Mod)):
+                self.matching_nodes.append(node)
+            self.generic_visit(node)
+            
+    visitor = DivVisitor()
+    visitor.visit(tree)
+    
+    if not visitor.matching_nodes:
+        return target_line, False
+        
+    node = visitor.matching_nodes[0]
+    op_symbol = {ast.Div: "/", ast.FloorDiv: "//", ast.Mod: "%"}[type(node.op)]
+    left_str = ast.unparse(node.left)
+    right_str = ast.unparse(node.right)
+    
+    pattern = re.escape(left_str) + r"\s*" + re.escape(op_symbol) + r"\s*" + re.escape(right_str)
+    replacement = f"({left_str} {op_symbol} {right_str} if {right_str} != 0 else 0)"
+    
+    new_line, count = re.subn(pattern, replacement, target_line, count=1)
+    if count > 0:
+        return new_line, True
+    return target_line, False
+
 def apply_rule_fix(file_content, line_number, category, error_message):
     """
     Applies rule-based regular expression repairs to common Python issues.
@@ -51,18 +125,48 @@ def apply_rule_fix(file_content, line_number, category, error_message):
             
     # 4. Division by zero
     elif "/" in target_line and ("division by zero" in error_message.lower() or "zerodivision" in category.lower()):
-        # Try to wrap divisor
-        # e.g., total / len(numbers) -> total / len(numbers) if len(numbers) != 0 else 0
-        match = re.search(r"(\w+)\s*/\s*len\((\w+)\)", target_line)
-        if match:
-            dividend, list_name = match.groups()
-            replaced = f"{dividend} / len({list_name}) if len({list_name}) != 0 else 0"
-            lines[idx] = target_line.replace(match.group(0), replaced)
-            explanation = f"Added length check guard to prevent division by zero on line {line_number}."
+        # Try AST-based file division fixer first
+        fixed_content, ok = fix_division_by_zero(file_content, line_number)
+        if ok:
+            explanation = f"Added divisor check guard to prevent division by zero on line {line_number}."
+            return fixed_content, explanation
+            
+        # Fallback to single-line AST division fixer
+        new_line, ok = fix_line_division(target_line)
+        if ok:
+            lines[idx] = new_line
+            explanation = f"Added divisor check guard to prevent division by zero on line {line_number}."
             changed = True
         else:
-            # General division fallback
-            explanation = f"ZeroDivisionError detected on line {line_number}. Add a check: if divisor != 0 before division."
+            # Try to wrap divisor using existing regex fallback
+            match = re.search(r"(\w+)\s*/\s*len\((\w+)\)", target_line)
+            if match:
+                dividend, list_name = match.groups()
+                replaced = f"{dividend} / len({list_name}) if len({list_name}) != 0 else 0"
+                lines[idx] = target_line.replace(match.group(0), replaced)
+                explanation = f"Added length check guard to prevent division by zero on line {line_number}."
+                changed = True
+            else:
+                # Literal division fallbacks
+                if "/ 0.0" in target_line:
+                    lines[idx] = target_line.replace("/ 0.0", "/ 1.0")
+                    explanation = f"Replaced division by zero with safe divisor 1.0 on line {line_number}."
+                    changed = True
+                elif "/0.0" in target_line:
+                    lines[idx] = target_line.replace("/0.0", "/1.0")
+                    explanation = f"Replaced division by zero with safe divisor 1.0 on line {line_number}."
+                    changed = True
+                elif "/ 0" in target_line:
+                    lines[idx] = target_line.replace("/ 0", "/ 1")
+                    explanation = f"Replaced division by zero with safe divisor 1 on line {line_number}."
+                    changed = True
+                elif "/0" in target_line:
+                    lines[idx] = target_line.replace("/0", "/1")
+                    explanation = f"Replaced division by zero with safe divisor 1 on line {line_number}."
+                    changed = True
+                else:
+                    # General division fallback
+                    explanation = f"ZeroDivisionError detected on line {line_number}. Add a check: if divisor != 0 before division."
             
     # 5. Dead Code
     elif "dead code" in error_message.lower() or "unreachable code" in error_message.lower():

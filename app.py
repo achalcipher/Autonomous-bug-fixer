@@ -241,6 +241,92 @@ if "explanation" not in st.session_state:
 # Instantiate Gemini Client
 ai_client = GeminiClient(api_key=st.session_state["api_key"])
 
+# ----------------- ANALYSIS PIPELINE FUNCTION -----------------
+def run_analysis_pipeline():
+    code_string = st.session_state["editor_code"]
+    
+    # Save code to temp file for static analyzer
+    temp_dir = tempfile.mkdtemp()
+    temp_file = os.path.join(temp_dir, "analyze_sandbox.py")
+    with open(temp_file, "w", encoding="utf-8") as f:
+        f.write(code_string)
+        
+    try:
+        # 1. Compile checks
+        syntax_errors = compile_analyzer.analyze_syntax(code_string, temp_file)
+        # 2. AST quality checks
+        ast_issues = ast_analyzer.analyze_ast(code_string, temp_file)
+        # 3. Running shell subprocess linters (pylint, flake8, mypy, bandit)
+        static_issues = static_analyzer.run_static_analysis(temp_file)
+        
+        # Combine all issues
+        all_issues = []
+        all_issues.extend(syntax_errors)
+        all_issues.extend(ast_issues)
+        all_issues.extend(static_issues)
+        
+        # Normalise paths in error reports
+        for issue in all_issues:
+            issue["file_path"] = st.session_state["active_filename"]
+            
+        # Count severity frequencies
+        critical_c = sum(1 for i in all_issues if i["severity"] == "Critical")
+        high_c = sum(1 for i in all_issues if i["severity"] == "High")
+        medium_c = sum(1 for i in all_issues if i["severity"] == "Medium")
+        low_c = sum(1 for i in all_issues if i["severity"] == "Low")
+        
+        # Calculate Severity Score
+        score = 100 - (critical_c * 20 + high_c * 12 + medium_c * 6 + low_c * 2)
+        score = max(0, min(100, score))
+        
+        # Save results in SQLite
+        scan_id = f"ide_scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        db_manager.save_scan(
+            scan_id=scan_id,
+            project_name=f"IDE_{st.session_state['active_filename']}",
+            file_count=1,
+            critical_count=critical_c,
+            high_count=high_c,
+            medium_count=medium_c,
+            low_count=low_c,
+            status="Completed"
+        )
+        
+        for issue in all_issues:
+            db_manager.save_scan_detail(
+                scan_id=scan_id,
+                file_path=issue["file_path"],
+                line_number=issue["line_number"],
+                severity=issue["severity"],
+                category=issue["category"],
+                error_message=issue["error_message"],
+                code_snippet=issue["code_snippet"],
+                fix_suggestion=issue["fix_suggestion"],
+                fixed_code=code_string # store snapshot of original file
+            )
+            
+        summary = {
+            "scan_id": scan_id,
+            "project_name": f"IDE_{st.session_state['active_filename']}",
+            "critical_count": critical_c,
+            "high_count": high_c,
+            "medium_count": medium_c,
+            "low_count": low_c,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        st.session_state["analysis_results"] = {
+            "summary": summary,
+            "details": all_issues,
+            "score": score
+        }
+        return all_issues
+    except Exception as e:
+        st.error(f"Analysis pipeline crashed: {str(e)}")
+        return []
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
 # ----------------- CODE RUNNER FUNCTION -----------------
 def execute_code_sandboxed(code_string):
     """
@@ -483,88 +569,11 @@ if btn_run:
 # Logic B: Analyze Code
 if btn_analyze:
     with st.spinner("Analyzing code quality, security vulnerabilities, and logic..."):
-        code_string = st.session_state["editor_code"]
-        
-        # Save code to temp file for static analyzer
-        temp_dir = tempfile.mkdtemp()
-        temp_file = os.path.join(temp_dir, "analyze_sandbox.py")
-        with open(temp_file, "w", encoding="utf-8") as f:
-            f.write(code_string)
-            
-        try:
-            # 1. Compile checks
-            syntax_errors = compile_analyzer.analyze_syntax(code_string, temp_file)
-            # 2. AST quality checks
-            ast_issues = ast_analyzer.analyze_ast(code_string, temp_file)
-            # 3. Running shell subprocess linters (pylint, flake8, mypy, bandit)
-            static_issues = static_analyzer.run_static_analysis(temp_file)
-            
-            # Combine all issues
-            all_issues = []
-            all_issues.extend(syntax_errors)
-            all_issues.extend(ast_issues)
-            all_issues.extend(static_issues)
-            
-            # Normalise paths in error reports
-            for issue in all_issues:
-                issue["file_path"] = st.session_state["active_filename"]
-                
-            # Count severity frequencies
-            critical_c = sum(1 for i in all_issues if i["severity"] == "Critical")
-            high_c = sum(1 for i in all_issues if i["severity"] == "High")
-            medium_c = sum(1 for i in all_issues if i["severity"] == "Medium")
-            low_c = sum(1 for i in all_issues if i["severity"] == "Low")
-            
-            # Calculate Severity Score
-            score = 100 - (critical_c * 20 + high_c * 12 + medium_c * 6 + low_c * 2)
-            score = max(0, min(100, score))
-            
-            # Save results in SQLite
-            scan_id = f"ide_scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            db_manager.save_scan(
-                scan_id=scan_id,
-                project_name=f"IDE_{st.session_state['active_filename']}",
-                file_count=1,
-                critical_count=critical_c,
-                high_count=high_c,
-                medium_count=medium_c,
-                low_count=low_c,
-                status="Completed"
-            )
-            
-            for issue in all_issues:
-                db_manager.save_scan_detail(
-                    scan_id=scan_id,
-                    file_path=issue["file_path"],
-                    line_number=issue["line_number"],
-                    severity=issue["severity"],
-                    category=issue["category"],
-                    error_message=issue["error_message"],
-                    code_snippet=issue["code_snippet"],
-                    fix_suggestion=issue["fix_suggestion"],
-                    fixed_code=code_string # store snapshot of original file
-                )
-                
-            summary = {
-                "scan_id": scan_id,
-                "project_name": f"IDE_{st.session_state['active_filename']}",
-                "critical_count": critical_c,
-                "high_count": high_c,
-                "medium_count": medium_c,
-                "low_count": low_c,
-                "timestamp": datetime.now().isoformat()
-            }
-            
-            st.session_state["analysis_results"] = {
-                "summary": summary,
-                "details": all_issues,
-                "score": score
-            }
+        all_issues = run_analysis_pipeline()
+        if all_issues:
             st.success(f"Analysis complete! Found {len(all_issues)} issues in codebase.")
-        except Exception as e:
-            st.error(f"Analysis pipeline crashed: {str(e)}")
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
+        else:
+            st.success("Analysis complete! No issues found.")
 
 # Logic C: Auto Fix (Global sweep)
 if btn_autofix:
@@ -577,18 +586,7 @@ if btn_autofix:
         if st.session_state["analysis_results"]:
             details_to_fix = st.session_state["analysis_results"]["details"]
         else:
-            # Quick syntax / AST / Static run to gather diagnostics
-            temp_dir = tempfile.mkdtemp()
-            temp_file = os.path.join(temp_dir, "temp_fix_target.py")
-            with open(temp_file, "w", encoding="utf-8") as f:
-                f.write(code_string)
-            try:
-                syntax_errors = compile_analyzer.analyze_syntax(code_string, temp_file)
-                ast_issues = ast_analyzer.analyze_ast(code_string, temp_file)
-                static_issues = static_analyzer.run_static_analysis(temp_file)
-                details_to_fix = syntax_errors + ast_issues + static_issues
-            finally:
-                shutil.rmtree(temp_dir, ignore_errors=True)
+            details_to_fix = run_analysis_pipeline()
                 
         if not details_to_fix:
             st.info("No bugs detected in codebase! No auto-fix needed.")
