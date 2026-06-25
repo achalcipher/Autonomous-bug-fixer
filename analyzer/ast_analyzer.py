@@ -67,7 +67,7 @@ class BugHunterVisitor(ast.NodeVisitor):
             is_zero = False
             if isinstance(node.right, ast.Constant) and node.right.value == 0:
                 is_zero = True
-            elif isinstance(node.right, ast.Num) and node.right.n == 0: # support python < 3.8
+            elif hasattr(ast, 'Num') and isinstance(node.right, getattr(ast, 'Num')) and node.right.n == 0:
                 is_zero = True
                 
             if is_zero:
